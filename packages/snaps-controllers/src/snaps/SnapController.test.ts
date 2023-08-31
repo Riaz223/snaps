@@ -6067,5 +6067,124 @@ describe('SnapController', () => {
       snapController.destroy();
       await service.terminateAllSnaps();
     });
+
+    it('removes redundant requestIds after timer is expired', async () => {
+      // Mechanism for preventing a snap to use extended runtime multiple times
+      // during one request relies on recording the request IDs.
+      // In order to prevent keeping a record of request IDs long-term, there is
+      // a mechanism with setTimeout that will remove it.
+      // The work of that mechanism can be tested if two requests with the same ID
+      // are sent sequentially with time-wait gap between that equals to the sum of
+      // the maximum snap runtime and time that snap requested for runtime extension.
+      // This confirms that the recorded requestId is deleted after first request
+      // is completed and the next request with the same ID is allowed to run.
+      const mockSnapId = 'npm:foo' as ValidatedSnapId;
+      const rootMessenger = getControllerMessenger();
+      const initialPermissions = {
+        [handlerEndowments.onRpcRequest]: { snaps: false, dapps: true },
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'endowment:extend-runtime': {},
+      };
+      const options = getSnapControllerWithEESOptions({
+        rootMessenger,
+        environmentEndowmentPermissions: ['extendRuntime'],
+        idleTimeCheckInterval: 30000,
+        maxIdleTime: 160000,
+        state: {
+          snaps: getPersistedSnapsState(
+            getPersistedSnapObject({
+              version: '0.0.1',
+              sourceCode: EXTENDED_RUNTIME_SNAP_BUNDLE,
+              id: mockSnapId,
+              manifest: getSnapManifest({ initialPermissions }),
+              enabled: true,
+              status: SnapStatus.Installing,
+              initialPermissions,
+            }),
+          ),
+        },
+      });
+
+      rootMessenger.registerActionHandler(
+        'PermissionController:hasPermission',
+        (_snapId: string, permission) => {
+          return permission !== SnapEndowments.LongRunning;
+        },
+      );
+
+      rootMessenger.registerActionHandler(
+        'PermissionController:getPermissions',
+        () => ({
+          // Permission to receive JSON-RPC requests from dapps.
+          [SnapEndowments.Rpc]: MOCK_RPC_ORIGINS_PERMISSION,
+        }),
+      );
+
+      rootMessenger.registerActionHandler(
+        'PermissionController:getEndowments',
+        async () => {
+          return Promise.resolve(['extendRuntime']);
+        },
+      );
+
+      const [snapController, service] = getSnapControllerWithEES(options);
+
+      const snap = snapController.getExpect(mockSnapId);
+
+      await snapController.startSnap(snap.id);
+      expect(snapController.state.snaps[snap.id].status).toBe('running');
+
+      // Set the maxRequestTime to a low enough value for it to time out if it
+      // weren't using a long-running endowment.
+      const maxRequestTime = 500;
+      // @ts-expect-error - `maxRequestTime` is a private property.
+      snapController.maxRequestTime = maxRequestTime;
+
+      // Mock requestId and use it for both requests
+      const mockRequestId = 'RPPA2vETUZ3EYa482cDAG';
+      // Specify for how long to run a snap process
+      const snapRealRuntime = 1000;
+      // Specify what is used for a timeWait in the snap source
+      const snapTimeWaitRequested = 2000; // in milliseconds here
+
+      let result = await snapController.handleRequest({
+        snapId: snap.id,
+        origin: 'foo.com',
+        handler: HandlerType.OnRpcRequest,
+        request: {
+          jsonrpc: '2.0',
+          method: 'test',
+          params: {
+            delay: snapRealRuntime, // Mock for how long snap's job will be running.
+          },
+          id: mockRequestId,
+        },
+      });
+
+      expect(result).toBe('JOB_DONE');
+      expect(snapController.state.snaps[snap.id].status).toBe('running');
+
+      await sleep(maxRequestTime + snapTimeWaitRequested);
+
+      result = await snapController.handleRequest({
+        snapId: snap.id,
+        origin: 'foo.com',
+        handler: HandlerType.OnRpcRequest,
+        request: {
+          jsonrpc: '2.0',
+          method: 'test',
+          params: {
+            delay: 1000, // Mock for how long snap's job will be running.
+          },
+          id: mockRequestId,
+        },
+      });
+
+      expect(result).toBe('JOB_DONE');
+      expect(snapController.state.snaps[snap.id].status).toBe('running');
+
+      snapController.destroy();
+      await service.terminateAllSnaps();
+    });
   });
 });
