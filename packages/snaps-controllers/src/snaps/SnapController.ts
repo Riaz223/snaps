@@ -1169,6 +1169,7 @@ export class SnapController extends BaseController<
       }
       this.#extendRuntimeRequests.add(inboundRequest.requestId);
       // Prevent redundant request IDs to be accumulated long term
+      /* istanbul ignore next */
       setTimeout(() => {
         this.#extendRuntimeRequests.delete(inboundRequest.requestId);
       }, (timeWait + 60) * 1000);
